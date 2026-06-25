@@ -47,10 +47,10 @@ func (failOnFieldStage) Process(ctx context.Context, rec Record) (Record, error)
 // setupFailStage fails its Setup, to exercise the abort-and-teardown path.
 type setupFailStage struct{ name string }
 
-func (s setupFailStage) Name() string                       { return s.name }
-func (s setupFailStage) Setup(ctx context.Context) error    { return errors.New("boom") }
+func (s setupFailStage) Name() string                                        { return s.name }
+func (s setupFailStage) Setup(ctx context.Context) error                     { return errors.New("boom") }
 func (s setupFailStage) Process(c context.Context, r Record) (Record, error) { return r, nil }
-func (s setupFailStage) Teardown(ctx context.Context) error { return nil }
+func (s setupFailStage) Teardown(ctx context.Context) error                  { return nil }
 
 // failingSource yields its good records, then returns a non-EOF error to
 // exercise the *fatal* source path: a read failure isn't attributable to one

@@ -166,7 +166,68 @@ concurrent engine.
 
 ## Task 3 — Layered HTTP: Client & Server Middleware
 
-_(filled in as we build)_
+**Shape:** two mirror-image halves. Outbound: decorators implementing a common
+`HttpDoer`. Inbound: middlewares of type `func(http.Handler) http.Handler`. Each
+concern is its own file/unit, composed by an explicit chain — never interleaved.
+
+### Key decisions
+
+1. **`HttpDoer` is the seam (decorator pattern).** One method, `Do`. The real
+   `*http.Client` already satisfies it, so it's just the innermost layer; every
+   decorator wraps an `HttpDoer` and *is* one, so they nest arbitrarily. The
+   server mirror is the stdlib `func(http.Handler) http.Handler`.
+
+2. **Explicit, reversible composition — not hand-written wrappers.** Client uses
+   `Chain(base, ...Decorator)`; server uses a small `MiddlewareStack` builder
+   (`Use`/`Then`). First layer = outermost. Making order a *parameter* (not baked
+   into nested code) is the brief's "clean composition mechanism" and lets order
+   be reasoned about and changed.
+
+3. **Composition order is a real decision, surfaced explicitly.** Client:
+   `cache → retry → logging → wire`. Cache outermost so hits skip everything
+   below; logging *innermost* so it records every wire attempt, including a 503
+   that retry later recovers (logging outermost would only see retry's final
+   200 — the integration test documents exactly this). Server: `request-id →
+   logging → rate-limit → auth`. ID first so all layers can log it; logging
+   outside auth so rejected (401) attempts are still recorded; auth last so we
+   reject just before the handler.
+
+4. **Each concern is testable in isolation.** Client decorators are tested
+   against a `DoerFunc` mock "layer below"; server middlewares against a fake
+   `http.Handler`. The rate-limit decorator depends on a `Limiter` interface so
+   it's tested with a fake (no real timing); the token bucket's `Allow` is tested
+   with an injected clock.
+
+5. **Token bucket implemented in-package (no `x/time/rate`).** Keeps the module
+   dependency-free and makes the mechanism explicit (continuous refill, burst
+   cap). It serves both sides via two methods reflecting different policies:
+   the client **waits** for a token (`Wait`, throttle the caller), the server
+   **rejects** (`Allow` → 429, shed load). Same primitive, opposite policy — a
+   deliberate contrast. `x/time/rate` is a drop-in behind `Limiter` if wanted.
+
+6. **Retry only retries the retryable.** Transport errors and 5xx are retried;
+   4xx are not (a client error won't fix itself). Backoff is exponential + capped
+   + optional full jitter (de-correlates concurrent clients). Sleeper and RNG are
+   injectable so tests are instant and deterministic; backoff honors the request
+   context. Discarded responses' bodies are closed to avoid leaks.
+
+7. **Cache correctness details.** Only GET + 2xx are cached (caching a POST or an
+   error is wrong). The body is buffered on the way in and a fresh reader handed
+   out per hit — the classic one-shot-`Body` bug, avoided. TTL via injectable
+   clock; hits carry `X-Cache: HIT`.
+
+8. **Context-key + Authenticator hygiene.** Request ID and principal use an
+   unexported context-key type (no cross-package collisions). `Auth` depends on
+   an injected `Authenticator` so the middleware owns only the HTTP concern
+   (extract header, 401, stash principal) while validation policy (static map,
+   JWT, introspection) stays pluggable.
+
+### Testing strategy
+Every decorator/middleware tested alone; a client composition test proves a
+cache hit prevents a second base call *through the whole stack*; a full
+integration test threads one request server-stack → handler → client-chain →
+flaky downstream and asserts auth/retry/cache/request-id are all visible in logs
+and counters. Whole suite is race-clean.
 
 ---
 
@@ -204,4 +265,17 @@ architecture and interrogate its output, not to accept it wholesale. A running l
     `Run` not return an error on job failure (failure isolation as the default).
   - Required the whole concurrent suite to pass under `-race` before trusting it.
 
-_(Task 3 AI notes added as we build it.)_
+### Task 3
+- **Used it for:** generating the decorator/middleware boilerplate, the token
+  bucket, and the per-concern tests once the interfaces and chain order were set.
+- **What I directed / changed:**
+  - Set the composition order deliberately and caught a real bug from it: the
+    first integration test had logging outermost, so the client log never showed
+    the retried 503. Reordered logging to innermost and documented why — a good
+    example of reviewing AI output against observed behavior, not just reading it.
+  - Chose to implement the token bucket rather than import `x/time/rate`, and to
+    give it two policies (client waits, server rejects) behind one type.
+  - Insisted retry skip 4xx and close discarded response bodies; insisted the
+    cache only store GET/2xx and buffer the body for replay.
+  - Kept each concern in its own file and depending on an interface (`Limiter`,
+    `Authenticator`) so it stays unit-testable in isolation.

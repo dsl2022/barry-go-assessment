@@ -38,9 +38,9 @@ func main() {
 	src := pipeline.NewSliceSource([]pipeline.Record{
 		{Data: map[string]any{"id": "1", "email": "ada@x.com", "name": "ada"}},
 		{Data: map[string]any{"id": "2", "email": "grace@x.com", "name": "grace"}},
-		{Data: map[string]any{"id": "1", "email": "dup@x.com", "name": "dup"}},     // duplicate id -> skipped
-		{Data: map[string]any{"id": "3", "name": "missing email"}},                 // invalid -> dead-letter
-		{Data: map[string]any{"id": 4, "email": "n@x.com", "name": "wrong type"}},  // id not string -> dead-letter
+		{Data: map[string]any{"id": "1", "email": "dup@x.com", "name": "dup"}},    // duplicate id -> skipped
+		{Data: map[string]any{"id": "3", "name": "missing email"}},                // invalid -> dead-letter
+		{Data: map[string]any{"id": 4, "email": "n@x.com", "name": "wrong type"}}, // id not string -> dead-letter
 	})
 	sink := &pipeline.SliceSink{}
 

@@ -25,13 +25,13 @@ const (
 // subscriber to do its job (log a line, bump a counter, send an alert) without
 // calling back into the engine.
 type Event struct {
-	Type      EventType
-	Workflow  string
-	JobID     string // empty for workflow-level events
-	State     JobState
-	Attempt   int    // 1-based attempt number for job run/retry events
-	Err       error  // set on failure events
-	Time      time.Time
+	Type          EventType
+	Workflow      string
+	JobID         string // empty for workflow-level events
+	State         JobState
+	Attempt       int   // 1-based attempt number for job run/retry events
+	Err           error // set on failure events
+	Time          time.Time
 	WorkflowState WorkflowState // set on workflow-level events
 }
 
