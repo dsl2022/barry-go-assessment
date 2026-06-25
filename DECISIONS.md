@@ -85,7 +85,84 @@ runs the whole thing from a JSON config over valid/invalid/duplicate records.
 
 ## Task 2 — Workflow Orchestrator Engine
 
-_(filled in as we build)_
+**Shape:** typed jobs are composed into a dependency DAG. The engine runs one
+goroutine per node; each waits on its dependencies' completion channels, applies
+a condition gate, then runs the job with retry. State machines guard every
+transition; a lifecycle event bus decouples logging/metrics/notifications.
+
+### Key decisions
+
+1. **Concurrent engine — the deliberate opposite of Task 1.** Independent
+   branches run in parallel goroutines. Here concurrency is *required by the
+   spec* ("a failed job must not halt unrelated branches" only means something if
+   branches run independently), whereas in Task 1 it was unjustified. Same
+   engineer, opposite choice, for stated reasons.
+
+2. **Goroutine-per-node + done-channels, no central scheduler.** Each node
+   goroutine blocks on `<-done[dep]` for each dependency, then runs. Ordering,
+   parallelism, failure isolation, and cancellation all *emerge* from these
+   channel waits + a `select` on `ctx.Done()` — there's no scheduler loop to get
+   wrong. *Alternative rejected:* a tick-based "find ready nodes" scheduler — more
+   state, more bug surface, no benefit at this scale.
+
+3. **"Typed jobs" = one `Job` interface + a shared result store.** All jobs
+   implement `Execute(ctx, *ExecutionContext)`; they exchange data through a
+   concurrency-safe blackboard keyed by job ID. *Alternative rejected:* generic
+   `Job[In,Out]` — a heterogeneous DAG erases to `any` at graph boundaries
+   anyway, so generics would add wiring ceremony for safety the graph can't keep.
+   (Note the contrast: I *did* use generics for the state machine, where they
+   remove real duplication — pattern where it helps, not everywhere.)
+
+4. **Explicit state machines, valid transitions only.** A generic table-driven
+   `machine[S]` enforces `Pending→Running→{Succeeded,Failed,Cancelled}` (jobs
+   also have `Skipped`). Illegal transitions return `ErrInvalidTransition` rather
+   than silently corrupting state.
+
+5. **`Skipped` is distinct from `Failed`.** A job whose condition is unmet (or
+   whose upstream didn't succeed) is `Skipped` — it never ran. A job that ran and
+   errored is `Failed`. Conflating them would break conditional routing and make
+   "did this fail?" unanswerable. Skipped jobs don't fail the workflow.
+
+6. **Failure isolation falls out of the condition rule.** Default gate = "all
+   deps Succeeded". So a failed job makes its dependents Skip, while branches not
+   depending on it run untouched. `Run` returns an error only on validation
+   failure — a job failing is a normal outcome in `RunResult`, never a `Run`
+   error. That makes "doesn't halt the run" the default, not an opt-in.
+
+7. **Conditional execution via a `Condition` interface.** `OnState`/
+   `OnOutputEquals` read the blackboard; a node with no condition uses the safe
+   default. Conditions are an interface (not bare funcs) so they self-describe in
+   logs and serialize from JSON.
+
+8. **Sub-workflows via the composite pattern.** `SubWorkflowJob` *is* a `Job`
+   wrapping a `Workflow`, run on the **same engine** — which is why the engine
+   holds no per-run state (it's reentrant). The sub-workflow shares the parent's
+   event bus, so its events surface in the same stream.
+
+9. **Event bus = observer pattern, fully decoupled.** The engine only calls
+   `bus.Publish`. Subscribers (logging/metrics/notification) are added from
+   outside and know nothing of the engine. Publish is synchronous + mutex-guarded
+   (events arrive from many goroutines); an async/buffered bus is a drop-in
+   behind the same interface if needed.
+
+10. **Per-job retry with injectable sleeper/RNG.** Exponential backoff + cap +
+    optional full jitter. The sleeper and RNG are injected so tests make retries
+    instant and deterministic while still honoring cancellation during backoff.
+
+11. **Registry + JSON: structure vs. behavior split.** Config declares the graph
+    (deps/conditions/retry); registered factories supply behavior and inject
+    non-serializable dependencies (HTTP client, Mailer). That's how config-driven
+    workflows still get real, testable jobs.
+
+### Testing strategy
+State-machine unit tests (valid + illegal transitions); engine tests for linear
+ordering, **failure isolation** (failed branch + independent branch), **conditional
+routing** (run-on-failure vs run-on-success), retry-then-succeed and
+retry-exhausted (attempt counts + event counts), **graceful shutdown** (Cancelled
+not Failed, propagates to dependents), and DAG validation (cycle/unknown-dep/
+duplicate). Job types tested in isolation with fakes; sub-workflow tested
+end-to-end. **Entire suite passes under `go test -race`** — the key signal for the
+concurrent engine.
 
 ## Task 3 — Layered HTTP: Client & Server Middleware
 
@@ -112,4 +189,19 @@ architecture and interrogate its output, not to accept it wholesale. A running l
     the timestamp clock injectable, for debuggability and deterministic tests.
   - Required the teardown-on-setup-failure path and a test that asserts it.
 
-_(Tasks 2 and 3 AI notes added as we build them.)_
+### Task 2
+- **Used it for:** scaffolding the engine's goroutine/channel plumbing, the
+  generic state machine, the config structs, and the bulk of the table-driven
+  tests once I'd settled the design.
+- **What I directed / changed:**
+  - Drove the **concurrent goroutine-per-node + done-channel** model and the
+    explicit contrast with Task 1's sequential choice; rejected a central
+    scheduler loop.
+  - Settled the "typed jobs" interpretation (shared result store, not generics)
+    and, separately, *did* introduce generics for the state machine where they
+    remove real duplication.
+  - Insisted `Skipped` be a first-class state distinct from `Failed`, and that
+    `Run` not return an error on job failure (failure isolation as the default).
+  - Required the whole concurrent suite to pass under `-race` before trusting it.
+
+_(Task 3 AI notes added as we build it.)_
