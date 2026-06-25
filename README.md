@@ -45,3 +45,4 @@ different judgment each time — which is the point of the set:
 ├── task3-httpx/      # Task 3 client + server middleware + tests
 └── cmd/              # runnable demo binaries (one per task)
 ```
+# barry-go-assessment

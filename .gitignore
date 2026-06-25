@@ -11,8 +11,11 @@ go.work.sum
 # Editor / OS
 .DS_Store
 .idea/
-.vscode/
 
 # Coverage
 coverage.txt
 *.cover
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
