@@ -52,6 +52,29 @@ func (s setupFailStage) Setup(ctx context.Context) error    { return errors.New(
 func (s setupFailStage) Process(c context.Context, r Record) (Record, error) { return r, nil }
 func (s setupFailStage) Teardown(ctx context.Context) error { return nil }
 
+// failingSource yields its good records, then returns a non-EOF error to
+// exercise the *fatal* source path: a read failure isn't attributable to one
+// record, so it halts the run rather than being dead-lettered.
+type failingSource struct {
+	good []Record
+	i    int
+	err  error
+}
+
+func (s *failingSource) Next(ctx context.Context) (Record, error) {
+	if s.i < len(s.good) {
+		r := s.good[s.i]
+		s.i++
+		return r, nil
+	}
+	return Record{}, s.err
+}
+
+// failingSink always errors on Write, to exercise the fatal sink path.
+type failingSink struct{ err error }
+
+func (s failingSink) Write(ctx context.Context, rec Record) error { return s.err }
+
 func recs(ms ...map[string]any) []Record {
 	out := make([]Record, len(ms))
 	for i, m := range ms {
@@ -190,6 +213,60 @@ func TestPipeline_GracefulShutdown(t *testing.T) {
 	// Teardown must still have run for the set-up stage.
 	if fmt.Sprint(log) != fmt.Sprint([]string{"setup:A", "teardown:A"}) {
 		t.Errorf("teardown should run on shutdown, log=%v", log)
+	}
+}
+
+func TestPipeline_FatalSourceError(t *testing.T) {
+	// A source read failure (not io.EOF) is fatal: the run stops and returns the
+	// error. It is NOT a dead letter — the failure isn't attributable to a record.
+	var log []string
+	a := &spyStage{name: "A", log: &log}
+	srcErr := errors.New("connection reset")
+	src := &failingSource{good: recs(map[string]any{"id": "1"}), err: srcErr}
+	p := New([]Stage{a})
+
+	stats, err := p.Run(context.Background(), src, &SliceSink{})
+	if err == nil {
+		t.Fatal("expected fatal source error")
+	}
+	if !errors.Is(err, srcErr) {
+		t.Errorf("run error should wrap the source error, got %v", err)
+	}
+	// The one good record before the failure flowed through normally.
+	if stats.Read != 1 || stats.Written != 1 {
+		t.Errorf("stats = %+v, want Read=1 Written=1", stats)
+	}
+	if stats.DeadLettered != 0 {
+		t.Errorf("source error must not be dead-lettered, got DeadLettered=%d", stats.DeadLettered)
+	}
+	// Teardown must still run despite the fatal exit.
+	if fmt.Sprint(log) != fmt.Sprint([]string{"setup:A", "process:A", "teardown:A"}) {
+		t.Errorf("teardown should run on fatal source error, log=%v", log)
+	}
+}
+
+func TestPipeline_FatalSinkError(t *testing.T) {
+	// A sink write failure is fatal for the same reason: we can't keep emitting
+	// to a broken destination. The record was read and processed, but never counted
+	// as Written because the write failed.
+	var log []string
+	a := &spyStage{name: "A", log: &log}
+	sinkErr := errors.New("disk full")
+	src := NewSliceSource(recs(map[string]any{"id": "1"}))
+	p := New([]Stage{a})
+
+	stats, err := p.Run(context.Background(), src, failingSink{err: sinkErr})
+	if err == nil {
+		t.Fatal("expected fatal sink error")
+	}
+	if !errors.Is(err, sinkErr) {
+		t.Errorf("run error should wrap the sink error, got %v", err)
+	}
+	if stats.Read != 1 || stats.Written != 0 {
+		t.Errorf("stats = %+v, want Read=1 Written=0", stats)
+	}
+	if fmt.Sprint(log) != fmt.Sprint([]string{"setup:A", "process:A", "teardown:A"}) {
+		t.Errorf("teardown should run on fatal sink error, log=%v", log)
 	}
 }
 
