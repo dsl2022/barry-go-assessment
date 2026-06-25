@@ -14,9 +14,27 @@ See [`DECISIONS.md`](./DECISIONS.md) for the architectural decisions, alternativ
 ## Running everything
 
 ```bash
-go build ./...   # build all packages and demo binaries
-go test ./...    # run the full test suite
+go build ./...            # build all packages and demo binaries
+go test ./... -race       # run the full test suite (race detector on)
+
+go run ./cmd/pipelinedemo # Task 1: config-driven pipeline over valid/invalid/dup records
+go run ./cmd/workflowdemo # Task 2: order pipeline — parallel/retry/conditional/sub-workflow
+go run ./cmd/httpdemo     # Task 3: server stack -> handler -> client chain -> downstream
 ```
+
+## The through-line
+
+All three tasks lean on the same small toolkit, applied with deliberately
+different judgment each time — which is the point of the set:
+
+- **Interface as the seam + registry for extension** — `Stage` (T1), `Job` (T2),
+  `HttpDoer`/`Middleware` (T3). Adding a unit never touches the engine.
+- **Composition order is a decision**, made explicit and reversible (T3's chains
+  most visibly).
+- **Concurrency where it's required, not by reflex** — sequential pipeline (T1)
+  vs. concurrent DAG (T2), each justified.
+- **Testability by injection** — clocks, RNGs, sleepers, and fakes throughout, so
+  every unit is testable in isolation and the suite is deterministic + race-clean.
 
 ## Layout
 
